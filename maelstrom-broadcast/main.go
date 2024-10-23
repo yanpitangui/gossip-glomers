@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -64,6 +65,7 @@ func broadcastHandler(msg maelstrom.Message) error {
 						return nil
 					})
 			}
+			time.Sleep(500 * time.Millisecond)
 
 		}()
 	}
@@ -113,6 +115,8 @@ func readHandler(msg maelstrom.Message) error {
 		return err
 	}
 
+	server.Mutex.RLock()
+	defer server.Mutex.RUnlock()
 	return server.Node.Reply(msg, map[string]any{
 		"type":     "read_ok",
 		"messages": slices.Collect(maps.Keys(server.Messages)),
