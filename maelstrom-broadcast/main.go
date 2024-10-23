@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 	"log"
+	"maps"
 	"slices"
 	"sync"
 )
 
 type Server struct {
 	Node     *maelstrom.Node
-	Messages []int
+	Messages map[int]struct{}
 	Topology topology
-	Mutex    *sync.Mutex
+	Mutex    *sync.RWMutex
 }
 
 var server Server
@@ -24,7 +25,7 @@ func main() {
 	n.Handle("read", readHandler)
 	n.Handle("topology", topologyHandler)
 
-	server = Server{n, make([]int, 0), topology{}, &sync.Mutex{}}
+	server = Server{n, make(map[int]struct{}, 0), topology{}, &sync.RWMutex{}}
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -42,25 +43,29 @@ func broadcastHandler(msg maelstrom.Message) error {
 		return err
 	}
 
-	server.Mutex.Lock()
-	if slices.Contains(server.Messages, body.Message) {
-		server.Mutex.Unlock()
+	if checkMessageExists(body.Message) {
 		return server.Node.Reply(msg, map[string]string{
 			"type": "broadcast_ok",
 		})
 	}
 
-	server.Messages = append(server.Messages, body.Message)
-	server.Mutex.Unlock()
+	storeMessage(body.Message)
 
 	for _, recipient := range server.Node.NodeIDs() {
-		if err := server.Node.Send(recipient,
-			receiveBroadcast{
-				Type:    "receive_broadcast",
-				Message: body.Message,
-			}); err != nil {
-			return err
-		}
+		go func() {
+			var acked bool
+			for !acked {
+				_ = server.Node.RPC(recipient,
+					receiveBroadcast{
+						Type:    "receive_broadcast",
+						Message: body.Message,
+					}, func(msg maelstrom.Message) error {
+						acked = true
+						return nil
+					})
+			}
+
+		}()
 	}
 
 	return server.Node.Reply(msg, map[string]string{
@@ -73,6 +78,19 @@ type receiveBroadcast struct {
 	Message int    `json:"message"`
 }
 
+func checkMessageExists(msg int) bool {
+	server.Mutex.RLock()
+	defer server.Mutex.RUnlock()
+	_, found := server.Messages[msg]
+	return found
+}
+
+func storeMessage(msg int) {
+	server.Mutex.Lock()
+	defer server.Mutex.Unlock()
+	server.Messages[msg] = struct{}{}
+}
+
 func receiveBroadcastHandler(msg maelstrom.Message) error {
 
 	var body receiveBroadcast
@@ -80,14 +98,11 @@ func receiveBroadcastHandler(msg maelstrom.Message) error {
 		return err
 	}
 
-	server.Mutex.Lock()
-	if slices.Contains(server.Messages, body.Message) {
-		server.Mutex.Unlock()
+	if checkMessageExists(body.Message) {
 		return nil
 	}
 
-	server.Messages = append(server.Messages, body.Message)
-	server.Mutex.Unlock()
+	storeMessage(body.Message)
 
 	return nil
 }
@@ -100,7 +115,7 @@ func readHandler(msg maelstrom.Message) error {
 
 	return server.Node.Reply(msg, map[string]any{
 		"type":     "read_ok",
-		"messages": server.Messages,
+		"messages": slices.Collect(maps.Keys(server.Messages)),
 	})
 
 }
